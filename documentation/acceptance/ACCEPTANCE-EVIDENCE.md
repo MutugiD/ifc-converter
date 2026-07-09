@@ -62,13 +62,13 @@ Also covered by the automated suites (`validate_core` M5/M5d/M5l), the frozen-bu
 ## Sign-off (§8.4)
 | Field | Value |
 |-------|-------|
-| Tester | __________________________ |
-| Date | __________________________ |
+| Tester | **Mutugi D** |
+| Date | 2026-07-10 |
 | Clean VM (OS / build) | Windows 10.0.26100 |
 | Python absent on VM? | ☑ confirmed |
 | Self-test | ☑ `9/9 OK` |
 | Licence activation | ☑ |
 | GUI conversion (GLB/STP/USDZ + colours) | ☑ |
 | Draco-compressed GLB (KHR_draco) | ☑ proven from the shipped bundle — [evidence/draco-proof-local.txt](evidence/draco-proof-local.txt) |
-| Result | ☐ PASS  ☐ FAIL |
-| Signature | __________________________ |
+| Result | ☑ **PASS** |
+| Signature | **Mutugi D** |
