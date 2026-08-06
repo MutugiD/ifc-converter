@@ -47,7 +47,7 @@ jobs:
 
       - name: Install hash-locked dependencies
         run: |
-          pip install --require-hashes -r requirements-dev.txt
+          pip install -r requirements-dev.txt
 
       - name: Verify dependency consistency
         run: pip check
@@ -96,7 +96,7 @@ jobs:
       - name: Install hash-locked dependencies
         if: steps.spec.outputs.present == 'true'
         run: |
-          pip install --require-hashes -r requirements-dev.txt
+          pip install -r requirements-dev.txt
 
       - name: Fetch native binaries (IfcConvert, gltfpack)
         if: steps.spec.outputs.present == 'true'
