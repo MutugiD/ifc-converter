@@ -23,6 +23,7 @@ DEFAULT_GLTFPIPELINE = paths.gltf_pipeline()
 
 
 def _output_writable(path: str) -> bool:
+    """True if `path` can be created and written to (probe write); §9.2 output-folder guard."""
     try:
         os.makedirs(path, exist_ok=True)
         probe = os.path.join(path, ".write_test")
@@ -35,6 +36,7 @@ def _output_writable(path: str) -> bool:
 
 
 def main(argv=None):
+    """Headless entry (`--cli`): parse args, license-gate, convert each file; returns a §9 exit code."""
     p = argparse.ArgumentParser(description="IFC -> filtered/cropped/colored GLB/STP (core pipeline)")
     p.add_argument("inputs", nargs="+", help="input .ifc file(s)")
     p.add_argument("--out", default="out", help="output folder")
@@ -51,11 +53,11 @@ def main(argv=None):
     p.add_argument("--compress", action="store_true", help="compress the GLB for AR (F5)")
     p.add_argument(
         "--compress-mode",
-        default="meshopt",
+        default="draco",
         choices=["meshopt", "quantize", "draco"],
-        help="meshopt/quantize via gltfpack (default); draco via gltf-pipeline (KHR_draco_mesh_compression)",
+        help="draco (default, spec) = low-poly + KHR_draco_mesh_compression; meshopt/quantize via gltfpack",
     )
-    p.add_argument("--simplify", type=float, default=0.5, help="gltfpack triangle ratio 0..1 (meshopt)")
+    p.add_argument("--simplify", type=float, default=0.5, help="gltfpack triangle decimation ratio 0..1")
     p.add_argument("--ifcconvert", default=DEFAULT_IFCCONVERT)
     p.add_argument("--gltfpack", default=DEFAULT_GLTFPACK)
     p.add_argument("--node", default=DEFAULT_NODE, help="Node runtime (draco mode)")
