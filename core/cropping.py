@@ -20,6 +20,7 @@ Box = tuple  # (xmin, xmax, ymin, ymax, zmin, zmax), entries may be None
 
 
 def storey_contained_guids(storey) -> set[str]:
+    """GlobalIds of the elements a storey directly contains (via IfcRelContainedInSpatialStructure)."""
     guids = set()
     for rel in getattr(storey, "ContainsElements", None) or []:
         for el in rel.RelatedElements:
@@ -39,6 +40,7 @@ def storey_z_box(storey, analysis, pad: float = 3.0) -> Box:
 
 
 def _overlaps(info, box: Box, tol: float = 1e-6) -> bool:
+    """True if the element's bbox has positive-length overlap with the box on every bounded axis."""
     mn, mx = info.bbox_min, info.bbox_max
     axes = [
         (box[0], box[1], mn[0], mx[0]),
@@ -67,14 +69,42 @@ def keep_guids(model, analysis, selected_groups, box: Box | None) -> set[str]:
     return out
 
 
+def remove_unselected(model, selected_groups) -> int:
+    """Remove every IfcElement whose class is not in a selected group (filter completeness).
+
+    `apply` only removes elements the analyze pass captured; real models also contain geometry the
+    iterator missed (e.g. IfcBuildingElementProxy) that IfcConvert would still render — uncoloured and
+    outside the chosen classes. Dropping anything outside the selected groups keeps the output to only
+    the chosen, coloured geometry (spec §3.1 "the user selects what to keep").
+    """
+    selected = set(selected_groups)
+    removed = 0
+    for el in list(model.by_type("IfcElement")):
+        try:
+            if filtering.group_of(el) in selected:
+                continue
+            ifcopenshell.api.root.remove_product(model, product=el)
+        except RuntimeError:
+            continue  # already removed via a prior cascade
+        removed += 1
+    return removed
+
+
 def apply(model, keep: set[str], analysis) -> int:
-    """Remove every analyzed (geometric) element NOT in `keep`. Returns count removed."""
+    """Remove every analyzed (geometric) element NOT in `keep`. Returns count removed.
+
+    On real models a `remove_product` can cascade dependents (aggregated/nested/voided elements), so a
+    later target may already be gone — `by_guid` then *raises* (it does not return None). Guard it and
+    skip the already-removed instance instead of crashing the whole file.
+    """
     removed = 0
     for guid in list(analysis.elements):
         if guid in keep:
             continue
-        el = model.by_guid(guid)
-        if el is not None:
-            ifcopenshell.api.root.remove_product(model, product=el)  # clean product removal
-            removed += 1
+        try:
+            el = model.by_guid(guid)
+        except RuntimeError:
+            continue  # already removed via a prior cascade (nested/aggregated/voided element)
+        ifcopenshell.api.root.remove_product(model, product=el)  # clean product removal
+        removed += 1
     return removed
