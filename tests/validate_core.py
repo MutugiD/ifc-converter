@@ -164,6 +164,7 @@ def m5():
         ifcconvert=IFCCONVERT,
         gltfpack=GLTFPACK,
         compress=True,
+        compress_mode="meshopt",  # this test is the gltfpack/meshopt path (default is now draco)
         simplify=0.5,
     )
     cs = comp.compress_stats
@@ -185,6 +186,7 @@ def m5_draco():
     import shutil as _sh
 
     plain = pipeline.process(REAL, OUT, list(filtering.ALL_GROUPS), targets=("glb",), ifcconvert=IFCCONVERT)
+    plain_tris = glbtools.triangle_count(plain.glb)
     # Wiring/error path is CI-safe (no Node needed): draco mode must fail clearly without its tools.
     err = ""
     try:
@@ -193,11 +195,11 @@ def m5_draco():
         err = str(e)
     check("draco without Node -> clear error", "Node" in err, err)
 
-    # Real Draco run when a Node + gltf-pipeline is available (bundled via --with-draco, or system Node).
+    # Real Draco run when a Node + gltf-pipeline is available (bundled by default, or system Node).
     node = paths.node() if os.path.isfile(paths.node()) else _sh.which("node")
     gp = paths.gltf_pipeline()
     if not (node and os.path.isfile(gp)):
-        print("      skip real Draco run (node/gltf-pipeline not fetched — see fetch_binaries --with-draco)")
+        print("      skip real Draco run (node/gltf-pipeline not fetched — see fetch_binaries --no-draco)")
         return
     comp = pipeline.process(
         REAL,
@@ -205,17 +207,73 @@ def m5_draco():
         list(filtering.ALL_GROUPS),
         targets=("glb",),
         ifcconvert=IFCCONVERT,
+        gltfpack=GLTFPACK,
         compress=True,
         compress_mode="draco",
         node=node,
         gltf_pipeline=gp,
+        simplify=0.5,
     )
     cs = comp.compress_stats
     check("draco compress stats (mode=draco)", cs and cs.get("mode") == "draco", str(cs))
     exts = _glb_extensions_required(comp.glb)
     check("GLB declares KHR_draco_mesh_compression", "KHR_draco_mesh_compression" in exts, str(exts))
     check("draco keeps materials/colors", len(glbtools.material_names(comp.glb)) > 0)
-    print(f"      info: bytes {cs['bytes_before']}->{cs['bytes_after']} (x{cs['ratio']})")
+    check("draco shrinks the GLB", cs["bytes_after"] < cs["bytes_before"], str(cs))
+    # real_building is hard-edged box geometry, which gltfpack's border-aware simplifier correctly does
+    # NOT collapse — triangles are preserved here (a wall must stay a wall). The low-poly/-si decimation
+    # stage is proven on a genuinely decimatable mesh in m5_lowpoly().
+    draco_tris = glbtools.triangle_count(comp.glb)
+    check(
+        "draco preserves box-geometry triangles (no corruption)",
+        draco_tris == plain_tris,
+        f"{plain_tris}->{draco_tris}",
+    )
+    print(
+        f"      info: tris {plain_tris}->{draco_tris}, "
+        f"bytes {cs['bytes_before']}->{cs['bytes_after']} (x{cs['ratio']})"
+    )
+
+
+def m5_lowpoly():
+    print("M5l AR low-poly — -si decimation (spec §1 'low-poly'/--optimize) on a decimatable mesh")
+    import tempfile
+
+    fd, dense = tempfile.mkstemp(suffix=".glb")
+    os.close(fd)
+    try:
+        n0 = glbtools.make_dense_glb(dense, n=40)  # 3200-triangle smooth curved surface
+        # meshopt path (CI-safe, no Node): -si must roughly halve the triangles at simplify=0.5.
+        import shutil as _sh
+
+        mo = dense + ".mo.glb"
+        _sh.copy(dense, mo)
+        postprocess.compress_glb(GLTFPACK, mo, mode="meshopt", simplify=0.5)
+        mo_tris = glbtools.triangle_count(mo)
+        check("meshopt -si decimates ~50% (low-poly)", mo_tris <= n0 * 0.65, f"{n0}->{mo_tris}")
+        check("decimated mesh keeps its material", len(glbtools.material_names(mo)) > 0)
+        # draco path (needs Node): decimate THEN Draco — must be both low-poly and KHR_draco.
+        node = paths.node() if os.path.isfile(paths.node()) else __import__("shutil").which("node")
+        gp = paths.gltf_pipeline()
+        if node and os.path.isfile(gp):
+            dr = dense + ".dr.glb"
+            _sh.copy(dense, dr)
+            postprocess.compress_glb(GLTFPACK, dr, mode="draco", simplify=0.5, node=node, gltf_pipeline=gp)
+            dr_tris = glbtools.triangle_count(dr)
+            exts = _glb_extensions_required(dr)
+            check("draco is low-poly (triangles reduced)", dr_tris <= n0 * 0.65, f"{n0}->{dr_tris}")
+            check(
+                "draco low-poly output still declares KHR_draco_mesh_compression",
+                "KHR_draco_mesh_compression" in exts,
+                str(exts),
+            )
+            print(f"      info: dense {n0} tris -> meshopt {mo_tris}, draco {dr_tris}")
+        else:
+            print(f"      info: dense {n0} tris -> meshopt {mo_tris} (skip draco leg — no Node)")
+    finally:
+        for p in (dense, dense + ".mo.glb", dense + ".dr.glb"):
+            if os.path.exists(p):
+                os.remove(p)
 
 
 def schema_compat():
@@ -267,6 +325,68 @@ def crop_cascade_safe():
     )
 
 
+def usdz_export():
+    """F6: GLB -> USDZ (iOS-native AR). Spec-compliant .usdz, geometry + our 4 colours preserved."""
+    import glob
+    import json
+    import re
+    import struct
+    import zipfile
+
+    r = pipeline.process(
+        FIXTURE,
+        OUT,
+        ["Structural", "MEP", "Architectural", "Cables"],
+        targets=("glb", "usdz"),
+        ifcconvert=IFCCONVERT,
+    )
+    check("usdz produced", bool(r.usdz) and os.path.isfile(r.usdz), str(r.usdz))
+    check("usdz_stats has geometry", bool(r.usdz_stats) and r.usdz_stats["vertices"] > 0, str(r.usdz_stats))
+
+    zf = zipfile.ZipFile(r.usdz)
+    names = zf.namelist()
+    check(
+        "usdz is a valid *stored* zip",
+        zf.testzip() is None and zf.infolist()[0].compress_type == zipfile.ZIP_STORED,
+    )
+    check("usdz first entry is the .usda layer", bool(names) and names[0].endswith(".usda"), str(names))
+
+    raw = open(r.usdz, "rb").read()
+    nlen, elen = struct.unpack_from("<HH", raw, 26)
+    data_off = 30 + nlen + elen
+    check("usdz first-file data is 64-byte aligned (Apple USDZ)", data_off % 64 == 0, f"offset={data_off}")
+
+    usda = zf.read(names[0]).decode("utf-8")
+    check("usda header + Y-up", usda.startswith("#usda 1.0") and 'upAxis = "Y"' in usda)
+    cols = set(re.findall(r"displayColor = \[\(([^)]+)\)\]", usda))
+    want = {"0.8, 0.8, 0.8", "0.2, 0.4, 0.8", "0.6, 0.3, 0.1", "0.9, 0.2, 0.2"}
+    check("usdz preserves all 4 AR group colours", want <= cols, str(cols))
+
+    # independent geometry cross-check: sum POSITION accessor counts straight from the GLB JSON
+    gdata = open(r.glb, "rb").read()
+    clen = struct.unpack_from("<I", gdata, 12)[0]
+    gj = json.loads(gdata[20 : 20 + clen])
+    vtot = sum(
+        gj["accessors"][prim["attributes"]["POSITION"]]["count"]
+        for mesh in gj.get("meshes", [])
+        for prim in mesh.get("primitives", [])
+    )
+    check(
+        "usdz vertex count matches GLB POSITION accessors",
+        r.usdz_stats["vertices"] == vtot,
+        f"{r.usdz_stats['vertices']} vs {vtot}",
+    )
+
+    # usdz-only target: a throwaway GLB is used then cleaned — none must be left behind
+    tmp = os.path.join(OUT, "usdzonly")
+    os.makedirs(tmp, exist_ok=True)
+    r2 = pipeline.process(FIXTURE, tmp, ["Structural", "MEP"], targets=("usdz",), ifcconvert=IFCCONVERT)
+    check(
+        "usdz-only leaves no stray GLB",
+        not glob.glob(os.path.join(tmp, "*.glb")) and os.path.isfile(r2.usdz),
+    )
+
+
 def main():
     import shutil
 
@@ -278,8 +398,10 @@ def main():
     m4()
     m5()
     m5_draco()
+    m5_lowpoly()
     schema_compat()
     crop_cascade_safe()
+    usdz_export()
     p = sum(_results)
     t = len(_results)
     print(f"\n==== {p}/{t} checks passed ====")

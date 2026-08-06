@@ -20,6 +20,8 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
+import _qa_license  # sibling helper: signs a machine-locked --license for the hardened --cli gate
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = os.path.join(ROOT, "tests", "fixtures")
 
@@ -66,11 +68,19 @@ def sha256(path):
 
 
 def run_selftest():
+    import tempfile
+
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
     r = subprocess.run([EXE, "--selftest"], capture_output=True, text=True, env=env, timeout=120)
+    # The windowed exe writes its result to a file (its console output doesn't reach a captured pipe);
+    # fall back to captured stdout for a source/dev run.
     out = (r.stdout or "") + (r.stderr or "")
-    line = next((ln for ln in out.splitlines() if "selftest:" in ln), out.strip().splitlines()[-1:] or "")
-    return r.returncode == 0, (line if isinstance(line, str) else "selftest output unavailable")
+    try:
+        out += "\n" + open(os.path.join(tempfile.gettempdir(), "IFC_Converter_selftest.txt")).read()
+    except OSError:
+        pass
+    line = next((ln for ln in out.splitlines() if "selftest:" in ln), "selftest output unavailable")
+    return r.returncode == 0, line
 
 
 def main():
@@ -78,10 +88,12 @@ def main():
     st_ok, st_line = run_selftest()
     exe_sha = sha256(EXE)
     gen = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # The frozen `--cli` requires a valid machine-locked key (PR #14); sign one for this run.
+    license_path = _qa_license.mint()
     rows, passed = [], 0
     for name, fixture, args in CASES:
         ifc = os.path.join(FIX, fixture)
-        cmd = [EXE, "--cli", ifc, "--out", OUT] + args
+        cmd = [EXE, "--cli", ifc, "--out", OUT] + args + ["--license", license_path]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             rc = r.returncode

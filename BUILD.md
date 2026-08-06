@@ -25,25 +25,43 @@ the install).
 ```powershell
 .\.venv\Scripts\python scripts\fetch_binaries.py
 ```
-Downloads `IfcConvert.exe` (IfcOpenShell 0.8.5) and `gltfpack.exe` (meshoptimizer 1.1) into `bin\`.
+Downloads `IfcConvert.exe` (IfcOpenShell 0.8.5) and `gltfpack.exe` (meshoptimizer 1.1) into `bin\`,
+**plus** the Draco backend by default — a portable `bin\node.exe` and `bin\gltfpipe\` (the
+gltf-pipeline package; needs `npm` on the build host). `main.spec` embeds them automatically. This is
+the spec default (§1/§5.1): the app ships low-poly + `KHR_draco_mesh_compression` AR GLB out of the box.
 They are not committed; the PyInstaller bundle embeds them.
 
-**Optional — Draco backend.** The default AR compression is meshopt (gltfpack). To also bundle the
-Draco backend (`KHR_draco_mesh_compression` via gltf-pipeline), fetch it (needs `npm` on the build
-host) and it will be embedded automatically by `main.spec` when present:
+**Minimal build (no Draco).** To skip the ~70 MB Node + gltf-pipeline toolchain (meshopt/quantize only,
+no `KHR_draco_mesh_compression`):
 ```powershell
-.\.venv\Scripts\python scripts\fetch_binaries.py --with-draco
+.\.venv\Scripts\python scripts\fetch_binaries.py --no-draco
 ```
-This adds a portable `bin\node.exe` and `bin\gltfpipe\` (the gltf-pipeline package). The app then
-offers `--compress-mode draco` (CLI) / the "draco" mode in the UI. Without it, only meshopt is built.
 
-## 4. (Optional) Obfuscate the licensing modules — production
-Production builds should obfuscate `licensing/` with **PyArmor** (a paid license is required; the
-spec's `--key` option was removed in PyInstaller 6, so PyArmor is the supported path):
+## 4. (Production) Obfuscate the licensing modules — free, no PyArmor
+Spec §6.3 wants `licensing/` obfuscated. Instead of **PyArmor** (paid), compile the licence/clock modules
+to native Windows `.pyd` with **Cython** — free, and stronger than shipping decompilable `.pyc`: the
+bundle carries machine code for the licence logic, so patching the check out of the compiled app is much
+harder. (PyInstaller's `--key` was removed in v6, so this replaces it.)
+
+**Prerequisites (build host only, nothing ships):**
 ```powershell
-.\.venv\Scripts\pyarmor gen --recursive licensing
+.\.venv\Scripts\python -m pip install cython
+# + a C compiler: MSVC "Build Tools for Visual Studio" (free, e.g. VS 2019/2022 Build Tools).
+.\.venv\Scripts\python scripts\obfuscate_licensing.py --check   # verifies both are present
 ```
-Then point the build at the obfuscated package. (CI builds the un-obfuscated tree.)
+
+**On a fresh release checkout, before building:**
+```powershell
+.\.venv\Scripts\python scripts\obfuscate_licensing.py
+```
+This compiles `licensing\core.py` + `clockguard.py` to `*.pyd`, **removes the `.py` sources**, and
+smoke-imports the compiled package. `licensing\` then holds only `__init__.py`, the two `.pyd`, and
+`public_key.pem`. The next `pyinstaller main.spec` bundles the `.pyd` (extensions win over source on
+import) — verified: the frozen exe still validates licences, and no licence `.py`/`.pyc` ships.
+
+> It **removes source in place** — run it on a throwaway release checkout, not your working tree
+> (`git checkout -- licensing` restores the `.py`). The default CI (`ci.yml`) builds the un-obfuscated
+> tree; obfuscation is a release-only step. The RSA private key is never involved (it isn't in the repo).
 
 ## 5. Build the one-folder bundle
 ```powershell
@@ -60,10 +78,17 @@ bundling of `bin\` and `licensing\public_key.pem`, `strip`, `noupx`).
 The self-test loads the native libraries from `_MEIPASS` and performs a **real IFC → GLB conversion**
 (IfcConvert + gltfpack) — it should print `selftest: 9/9 OK`.
 
-The bundle can also run **headless batch conversions** (no GUI):
+The bundle can also run **headless batch conversions** (no GUI). The frozen `--cli` requires a valid
+machine-locked license key (`--license`, hardened in PR #14):
 ```powershell
-.\dist\IFC_Converter\IFC_Converter.exe --cli model.ifc --out out --classes Structural,MEP --glb --stp --compress
+.\dist\IFC_Converter\IFC_Converter.exe --cli model.ifc --out out --classes Structural,MEP `
+    --glb --stp --usdz --compress --license C:\key.key
 ```
+
+**AR outputs.** `--glb` (glTF, meshopt/Draco-compressible) and `--usdz` (Apple ARKit / Quick Look) are
+both Y-up and carry the four group colours. USDZ is produced by `core/usdz.py` directly from the GLB —
+**no extra dependency or bundled binary** (it authors USD + packages a spec-compliant `.usdz` in-process),
+so nothing needs adding to the build. STP (`--stp`) is CAD-grade solid geometry via IfcConvert.
 
 ### Acceptance / §8.4 test report
 Drive the built bundle through real conversions and emit the signable §8.4 test report:
