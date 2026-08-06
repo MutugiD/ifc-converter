@@ -11,6 +11,22 @@ import os
 import sys
 
 
+def _attach_console() -> None:
+    """Windowed (console=False) build: attach to the launching terminal's console so --selftest / --cli
+    output is visible from cmd/PowerShell (a GUI-subsystem exe otherwise discards stdout). No-op off
+    Windows or when there is no parent console."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        if ctypes.windll.kernel32.AttachConsole(0xFFFFFFFF):  # ATTACH_PARENT_PROCESS
+            sys.stdout = open("CONOUT$", "w", buffering=1, encoding="utf-8", errors="replace")
+            sys.stderr = sys.stdout
+    except Exception:
+        pass
+
+
 def selftest() -> int:
     """Headless bundle self-check (no GUI/display). Proves bundled native deps + binaries load.
     This is the on-this-machine proxy for the clean-VM smoke test (§8.4)."""
@@ -23,26 +39,45 @@ def selftest() -> int:
     from core import paths
 
     oks = []
+    report = []
 
     def ck(name, cond):
         """Record + print one self-test check result."""
         oks.append(bool(cond))
-        print(("  OK   " if cond else "  FAIL ") + name)
+        line = ("  OK   " if cond else "  FAIL ") + name
+        report.append(line)
+        print(line)
 
     ck(f"ifcopenshell {ifcopenshell.version} imports (native libs)", True)
     ck("IfcConvert bundled", os.path.isfile(paths.ifcconvert()))
     ck("gltfpack bundled", os.path.isfile(paths.gltfpack()))
-    ck("public_key bundled", os.path.isfile(paths.public_key()))
     try:
         r = subprocess.run([paths.ifcconvert(), "--version"], capture_output=True)
         ck("IfcConvert runs", r.returncode == 0)
     except Exception as e:
         ck(f"IfcConvert runs ({e})", False)
     try:
-        licensing.load_public_key_pem()
-        ck("public key loads", True)
+        from cryptography.hazmat.primitives import serialization
+
+        # §6.2: the public key is hard-coded in code (not a bundled file). Verify it loads as RSA-4096.
+        k = serialization.load_pem_public_key(licensing.load_public_key_pem())
+        ck("public key hard-coded (embedded RSA-4096)", k.key_size == 4096)
     except Exception as e:
-        ck(f"public key loads ({e})", False)
+        ck(f"public key hard-coded ({e})", False)
+    try:
+        # licensing crypto works end-to-end in the bundle: sign a key with an ephemeral RSA pair and
+        # verify it (machine-bound). Proves PKCS1v15/SHA-256 sign+verify + the machineid path load.
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        _p = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        _pub = _p.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        _lic = licensing.sign_license(_p, "SELFTEST", "2099-12-31")
+        _ok = licensing.verify_license(_lic, _pub, current_machine="SELFTEST").ok
+        ck("licence sign+verify roundtrip", _ok)
+    except Exception as e:
+        ck(f"licence sign+verify roundtrip ({e})", False)
 
     # Real end-to-end conversion INSIDE the bundle: build an IFC, then run the full
     # pipeline (filter -> color -> crop -> IfcConvert -> gltfpack) and inspect the GLB.
@@ -109,12 +144,26 @@ def selftest() -> int:
     MainWindow()
     ck("Qt + UI construct (offscreen)", True)
 
-    print(f"selftest: {sum(oks)}/{len(oks)} OK")
+    summary = f"selftest: {sum(oks)}/{len(oks)} OK"
+    report.append(summary)
+    print(summary)
+    # Also write a file so the result is capturable even when console output is swallowed (§8.4 evidence).
+    try:
+        import tempfile
+
+        out = os.path.join(tempfile.gettempdir(), "IFC_Converter_selftest.txt")
+        with open(out, "w", encoding="utf-8") as f:
+            f.write("\n".join(report) + "\n")
+        print(f"(result written to {out})")
+    except Exception:
+        pass
     return 0 if all(oks) else 1
 
 
 def main():
     """Process entry point: dispatch to --selftest / --cli, else launch the licensed GUI."""
+    if ("--selftest" in sys.argv) or ("--cli" in sys.argv):
+        _attach_console()  # make headless output visible from a terminal (windowed build)
     if "--selftest" in sys.argv:
         return selftest()
     if "--cli" in sys.argv:
