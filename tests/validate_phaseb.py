@@ -114,6 +114,23 @@ def f7_licensing():
         "foreign-key signature rejected", not licensing.verify_license(forged, pub_pem, current_machine=M).ok
     )
 
+    # §6.2: the production public key is HARD-CODED (embedded in code, compiled into core.pyd for
+    # release), NOT a swappable file. Prove the key-substitution bypass is closed: load_public_key_pem()
+    # returns the compiled-in constant, so replacing public_key.pem on disk cannot make the app trust an
+    # attacker's key, and an attacker-signed license is rejected by the embedded key.
+    import licensing.core as _lc
+
+    check(
+        "public key is embedded (returns the hard-coded constant, not a file)",
+        licensing.load_public_key_pem() == _lc._PUBLIC_KEY_PEM and b"BEGIN PUBLIC KEY" in _lc._PUBLIC_KEY_PEM,
+    )
+    atk = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    atk_lic = licensing.sign_license(atk, M, future)
+    check(
+        "key-swap bypass closed: attacker license rejected by the embedded key",
+        not licensing.verify_license(atk_lic, licensing.load_public_key_pem(), current_machine=M).ok,
+    )
+
     # verify_file (on-disk key path)
     import json as _json
     import tempfile as _tmp
@@ -145,6 +162,19 @@ def f7_licensing():
     check("same/later time ok", licensing.check_clock(store, now + timedelta(days=1))[0])
     ok, reason = licensing.check_clock(store, now - timedelta(days=5))  # rolled back
     check("rolled-back clock locked", (not ok) and "tamper" in reason.lower(), reason)
+
+    # robustness: a corrupt/hand-edited stamp must NOT crash the app at launch -> treated as first run
+    corrupt = licensing.InMemoryStore("not-a-timestamp")
+    ok_c, _ = licensing.check_clock(corrupt, now)
+    check("corrupt stored stamp -> first run (no crash)", ok_c and corrupt.get() == now.isoformat())
+
+    # robustness: a registry write failure must NOT crash -> guard degrades, run allowed
+    class _FailSet(licensing.InMemoryStore):
+        def set(self, value):
+            raise OSError("registry write denied")
+
+    ok_s, _ = licensing.check_clock(_FailSet(), now)
+    check("registry write failure -> no crash (guard degrades)", ok_s)
 
     # clock guard via the REAL HKCU registry store (the production path)
     if sys.platform == "win32":
