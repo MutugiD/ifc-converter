@@ -63,9 +63,14 @@ def ui_widgets():
         "queue/progress/cancel/targets/output controls present",
         all(
             hasattr(w, a)
-            for a in ("btn_cancel", "progress", "cb_stp", "cb_compress", "out_label", "xyz_toggle")
+            for a in ("btn_cancel", "progress", "cb_stp", "cb_usdz", "cb_compress", "out_label", "xyz_toggle")
         ),
     )
+    # F6: the USDZ checkbox drives the target list (off -> no usdz; on -> usdz requested)
+    check("USDZ off -> not a target", "usdz" not in w.build_opts()["targets"])
+    w.cb_usdz.setChecked(True)
+    check("USDZ on -> 'usdz' target requested", "usdz" in w.build_opts()["targets"])
+    w.cb_usdz.setChecked(False)
 
 
 def license_flow():
@@ -140,6 +145,9 @@ def real_world_e2e():
             ifcconvert=paths.ifcconvert(),
             gltfpack=paths.gltfpack(),
             compress=compress,
+            # compress defaults to draco (spec) — wire the toolchain exactly as the real UI does
+            node=paths.node(),
+            gltf_pipeline=paths.gltf_pipeline(),
         )
         states = []
         w = BatchWorker([real], opts)
@@ -180,6 +188,14 @@ def conformance():
         w._output_writable(OUT) and not w._output_writable(os.path.join(OUT, "_no_such_subdir")),
     )
     check("progress heartbeat fires within 2s (§9.4)", 0 < w._heartbeat.interval() <= 2000)
+    w._files = [FIXTURE, FIXTURE]
+    w._set_queue_label(1, 73)
+    qt = w.queue_label.text()
+    check(
+        "queue shows position + current file + percent (§4.2)",
+        "2 of 2" in qt and "fixture.ifc" in qt and "73%" in qt,
+        qt,
+    )
     rp = os.path.join(OUT, "conversion_report.txt")
     report_text = open(rp).read() if os.path.exists(rp) else ""
     check("conversion_report.txt written by the worker (§5.2)", os.path.exists(rp))
@@ -221,6 +237,55 @@ def liveness_and_render():
     check("license dialog renders non-blank", dimg.width() > 1 and dimg.height() > 1)
 
 
+def close_during_conversion():
+    """§9.5: closing the app mid-conversion must prompt; No aborts the close, Yes cancels gracefully."""
+    from PySide6.QtCore import QThread
+    from PySide6.QtWidgets import QMessageBox
+
+    print("§9.5 close-during-conversion confirmation")
+    w = MainWindow()
+
+    class _Ev:
+        def __init__(self):
+            self.accepted = None
+
+        def accept(self):
+            self.accepted = True
+
+        def ignore(self):
+            self.accepted = False
+
+    cancelled = {"n": 0}
+
+    class _Worker:
+        def cancel(self):
+            cancelled["n"] += 1
+
+    # simulate a run in progress
+    w._thread = QThread()
+    w._worker = _Worker()
+
+    orig = QMessageBox.question
+    try:
+        QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.No)
+        ev = _Ev()
+        w.closeEvent(ev)
+        check("running + 'No' -> close ignored, no cancel", ev.accepted is False and cancelled["n"] == 0)
+
+        QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+        ev = _Ev()
+        w.closeEvent(ev)
+        check("running + 'Yes' -> cancelled + accepted", ev.accepted is True and cancelled["n"] == 1)
+    finally:
+        QMessageBox.question = orig
+        w._thread = None
+        w._worker = None
+
+    ev = _Ev()  # idle -> closes immediately, no prompt
+    w.closeEvent(ev)
+    check("idle -> closes without prompt", ev.accepted is True)
+
+
 def main():
     import shutil
 
@@ -232,6 +297,7 @@ def main():
     real_world_e2e()
     conformance()
     liveness_and_render()
+    close_during_conversion()
     p, t = sum(_results), len(_results)
     print(f"\n==== {p}/{t} checks passed ====")
     sys.exit(0 if p == t else 1)
